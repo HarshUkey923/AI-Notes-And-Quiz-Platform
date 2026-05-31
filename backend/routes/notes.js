@@ -2,7 +2,7 @@ const express = require("express");
 const pdf = require("pdf-parse");
 const fetch = require("node-fetch");
 const auth = require("../middleware/auth");
-const { upload, cloudinary } = require("../config/cloudinary.js");
+const { upload, cloudinary } = require("../config/cloudinary");
 const Note = require("../models/Note");
 const Quiz = require("../models/Quiz");
 
@@ -16,8 +16,8 @@ router.post("/upload", auth, upload.single("pdf"), async (req, res) => {
     const note = await Note.create({
       userId: req.userId,
       title: req.body.title || req.file.originalname.replace(/\.pdf$/i, ""),
-      fileUrl: req.file.path,           // Cloudinary secure URL
-      publicId: req.file.filename,      // Cloudinary public_id
+      fileUrl: req.file.path,         // Cloudinary URL
+      publicId: req.file.filename,    // Cloudinary public_id
     });
 
     res.status(201).json({ note });
@@ -53,18 +53,25 @@ router.post("/:id/summarize", auth, async (req, res) => {
     const note = await Note.findOne({ _id: req.params.id, userId: req.userId });
     if (!note) return res.status(404).json({ message: "Note not found" });
 
-    // Fetch PDF directly from Cloudinary URL
-    const pdfRes = await fetch(note.fileUrl);
-    if (!pdfRes.ok)
-      return res.status(404).json({ message: "PDF file not found on Cloudinary" });
+    // Fetch PDF from Cloudinary URL
+    const pdfResponse = await fetch(note.fileUrl);
+    if (!pdfResponse.ok)
+      return res.status(502).json({ message: "Failed to fetch PDF from Cloudinary" });
 
-    const pdfBuffer = await pdfRes.buffer();
-    const { text } = await pdf(pdfBuffer);
+    const pdfBuffer = await pdfResponse.buffer();
+    const pdfData = await pdf(pdfBuffer);
+    const fullText = pdfData.text || "";
 
-    if (!text || text.trim().length === 0)
+    if (!fullText || fullText.trim().length === 0)
       return res.status(400).json({ message: "Could not extract text. Make sure the PDF is not a scanned image." });
 
-    const trimmedText = text.slice(0, 8000);
+    // Split into pages — pdf-parse separates pages with form feed (\f)
+    const pageTexts = fullText
+      .split(/\f/)
+      .map(p => p.trim())
+      .filter(p => p.length > 20);
+
+    const trimmedText = fullText.slice(0, 30000);
 
     // Call Groq API
     const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -77,8 +84,9 @@ router.post("/:id/summarize", auth, async (req, res) => {
         model: "llama-3.3-70b-versatile",
         messages: [{
           role: "user",
-          content: `Summarize the following text in clear, concise bullet points. Focus on covering every concept and topic. 
-          Ignore irrelevant content like course information, introduction and author. Format as markdown:\n\n${trimmedText}`,
+          content: `Summarize the following text in clear, concise bullet points. 
+          Focus on covering every concept and topic. Ignore irrelevant content like course information, introduction and author. 
+          Format as markdown:\n\n${trimmedText}`,
         }],
       }),
     });
@@ -88,8 +96,10 @@ router.post("/:id/summarize", auth, async (req, res) => {
     if (!summary) return res.status(500).json({ message: "Groq returned no summary", detail: groqData });
 
     note.extractedText = trimmedText;
+    note.pageTexts = pageTexts;
     note.summary = summary;
     await note.save();
+    console.log(`Saved ${pageTexts.length} page segments for note ${note._id}`);
 
     res.json({ summary });
   } catch (err) {
@@ -104,8 +114,9 @@ router.delete("/:id", auth, async (req, res) => {
     const note = await Note.findOneAndDelete({ _id: req.params.id, userId: req.userId });
     if (!note) return res.status(404).json({ message: "Note not found" });
 
-    // Delete file from Cloudinary
-    await cloudinary.uploader.destroy(note.publicId, { resource_type: "raw" });
+    if (note.publicId) {
+      await cloudinary.uploader.destroy(note.publicId, { resource_type: "raw" });
+    }
 
     await Quiz.deleteMany({ noteId: note._id });
     res.json({ message: "Note deleted" });
