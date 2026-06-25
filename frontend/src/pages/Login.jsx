@@ -70,7 +70,7 @@ export default function Login() {
             {loading ? "Signing in..." : "Sign in"}
           </button>
         </form>
-
+        <p className="text-center text-sm text-slate-500 dark:text-slate-400 mt-6">For test: email- user@test.com, password- testuser</p>
         <p className="text-center text-sm text-slate-500 dark:text-slate-400 mt-6">
           Don't have an account?{" "}
           <Link to="/register" className="text-brand-600 font-medium hover:underline">
